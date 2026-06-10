@@ -1,5 +1,6 @@
 # secrets -- never commit
 .env
+commands.md
 
 #Claude
 CLAUDE.md
