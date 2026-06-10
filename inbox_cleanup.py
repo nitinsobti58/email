@@ -112,6 +112,22 @@ SKIP_NAME_PATTERNS = ("trash", "junk", "spam", "deleted", "bin", "drafts", "sent
 _LIST_RE = re.compile(r'^\(([^)]*)\)\s+(?:"[^"]*"|\S+)\s+(?:"([^"]*)"|(\S+))\s*$')
 
 
+def imap_quote(name):
+    """Wrap a mailbox name in IMAP quotes so it survives SELECT/EXAMINE.
+
+    imaplib does NOT quote mailbox names for you, so a folder containing a space
+    (or, as iCloud has, a TRAILING space like "Madison ") would be sent as a
+    bare atom and the server rejects it ("unexpected space at the end of line").
+    Quoting fixes that. Per the IMAP spec, a quoted string escapes embedded
+    backslashes and double-quotes with a backslash. Names that are already
+    quoted (e.g. Gmail's '"[Gmail]/All Mail"') are left as-is.
+    """
+    if len(name) >= 2 and name[0] == '"' and name[-1] == '"':
+        return name  # already quoted -- don't double-quote it
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 # --- Date helper -------------------------------------------------------------
 def before_date_str(dt):
     """Format a date as an IMAP 'BEFORE' string, e.g. '01-Jan-2026'.
@@ -316,7 +332,8 @@ def process_account(imap, account, criteria, do_delete, detail_log):
     for folder in folders:
         # readonly=True for a dry run makes mutation physically impossible;
         # readonly=False only when we're actually going to delete.
-        typ, _ = imap.select(folder, readonly=not do_delete)
+        # imap_quote() guards against folder names with spaces/trailing spaces.
+        typ, _ = imap.select(imap_quote(folder), readonly=not do_delete)
         if typ != "OK":
             print(f"    could not open {folder!r}; skipping", file=sys.stderr)
             continue
