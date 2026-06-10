@@ -178,4 +178,77 @@ top to bottom as a guided tour.
   `--since` to narrow it down.
 - The "likely account" flag is a heuristic based on subject keywords — treat it
   as a hint, not a guarantee.
+
+---
+
+# inbox_cleanup (destructive — read this carefully)
+
+`inbox_cleanup.py` is a **companion tool that permanently deletes old mail**. It
+is the deliberate opposite of `inbox_inventory.py` (which is read-only). Use it
+*after* you've used the inventory to migrate the accounts you care about.
+
+> ⚠️ **Deletions are PERMANENT.** Expunged mail does **not** go to Trash and
+> **cannot be recovered**. Always dry-run first.
+
+### What it does
+
+By default it permanently deletes every message dated **before January 1st of
+the current year**, **except** mail from a sender you keep (default
+`21131mmw@gmail.com`), across the accounts you name.
+
+It is **provider-aware**, which matters a lot:
+
+- **Gmail** — folders are really labels, and deleting from a label only *removes
+  the label*. So Gmail is cleaned **once via `[Gmail]/All Mail`**, where an
+  expunge is a true permanent delete.
+- **iCloud / AOL** — standard IMAP; the tool iterates every normal folder
+  (skipping Trash / Junk / Spam / Drafts / Sent and non-selectable folders) and
+  expunges per folder.
+
+### Safety model
+
+- **Dry-run by default.** Without `--confirm` it only **counts** candidates and
+  opens folders **read-only**, so it physically cannot change your mailbox.
+- **`--confirm` requires you to type `DELETE`** at a prompt before anything is
+  expunged — and only then are folders opened read-write.
+- Every run writes **`cleanup_audit.csv`** (account / folder / candidate_count /
+  deleted_count / dry_run). `--detail-log` adds **`cleanup_detail.csv`** with one
+  row per candidate message (uid / date / from / subject) so you can verify the
+  filter before deleting.
+
+### Recommended workflow
+
+```bash
+# 1. See which folders are in scope vs skipped (no deletion):
+python3 inbox_cleanup.py --accounts icloud aol --list-folders
+
+# 2. DRY RUN with a per-message log, then open cleanup_detail.csv and confirm:
+#    - NO rows are from 21131mmw@gmail.com
+#    - ALL dates are before this year
+python3 inbox_cleanup.py --accounts gmail icloud aol --detail-log
+
+# 3. Delete for real — one account first — and type DELETE when prompted:
+python3 inbox_cleanup.py --accounts gmail --confirm
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--accounts gmail icloud aol` | **Required.** Which mailboxes to clean. |
+| `--confirm` | Actually delete. Without it, the run is a dry run. |
+| `--before YYYY-MM-DD` | Cutoff date (default: Jan 1 of the current year). |
+| `--keep-from ADDRESS` | Sender to never delete (default: `21131mmw@gmail.com`). |
+| `--detail-log` | Also write `cleanup_detail.csv` listing every candidate. |
+| `--list-folders` | Show in-scope vs skipped folders and exit. |
+| `--env-file PATH` | `.env` file with credentials (default: `.env`). |
+| `--outdir DIR` | Where to write the audit CSV(s) (default: current). |
+
+### Caveats
+
+- `NOT FROM` is an IMAP **substring** match, so it errs on the safe side — it
+  *keeps* anything whose `From` header contains the keep-address; it never
+  deletes it by mistake.
+- iCloud/AOL permanence depends on the server's expunge behavior. **Verify on a
+  single message** before doing a bulk run.
 ```
