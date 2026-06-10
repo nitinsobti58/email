@@ -2,7 +2,7 @@
 .env
 
 #Claude
-Claude.md
+CLAUDE.md
 .claude/
 
 # generated output
