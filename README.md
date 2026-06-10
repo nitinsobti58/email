@@ -251,4 +251,45 @@ python3 inbox_cleanup.py --accounts gmail --confirm
   deletes it by mistake.
 - iCloud/AOL permanence depends on the server's expunge behavior. **Verify on a
   single message** before doing a bulk run.
+
+---
+
+# sender_frequency (read-only ranking)
+
+`sender_frequency.py` counts how many emails each **sender** sent you across your
+**entire mailbox (all folders)** and ranks them so you can clean up the
+highest-volume senders first. It is read-only — like `inbox_inventory.py`, it
+only fetches headers and marks nothing read.
+
+### What it does
+
+- Counts messages **per sender address** (finer-grained than the domain-level
+  `inbox_inventory.py`), and notes which folders each sender appears in.
+- Adds a **`frequency`** column = `total_messages / 100` (a scaled count you can
+  sort on — 250 emails → `2.5`).
+- Output is sorted **highest count first**.
+
+It counts the *whole mailbox*, which means it's provider-aware:
+
+- **Gmail** → scanned via `[Gmail]/All Mail` only (every message lives there;
+  scanning labels too would double-count). Note All Mail excludes Spam/Trash.
+- **iCloud / AOL** → iterates **every selectable folder** and sums. Sent/Drafts
+  are included, so your **own address** can appear as a sender — just ignore it.
+
+### Run it
+
+```bash
+python3 sender_frequency.py --accounts gmail icloud aol   # all three
+python3 sender_frequency.py --accounts gmail              # one account
+python3 sender_frequency.py --accounts icloud --limit 500 # quick test
+python3 sender_frequency.py --accounts aol --list-folders # which folders scan
 ```
+
+Outputs: `sender_freq_<account>.csv` per account, and a combined
+`sender_frequency.csv` (with a leading `account` column).
+
+### Columns
+
+`sender_address`, `sender_name`, `domain`, `total_messages`, `frequency`,
+`first_seen`, `last_seen`, `folder_count`, `folders`, `mailing_list`,
+`likely_account`, `unsubscribe_link`.

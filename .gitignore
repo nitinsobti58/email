@@ -11,6 +11,8 @@ senders_*.csv
 worklist.csv
 cleanup_audit.csv
 cleanup_detail.csv
+sender_freq_*.csv
+sender_frequency.csv
 output/
 
 # python
