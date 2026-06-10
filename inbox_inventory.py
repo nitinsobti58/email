@@ -176,11 +176,13 @@ def extract_unsub(header_value):
     links = _ANGLE.findall(header_value) or [header_value.strip()]
     # This is a "list comprehension": build a new list by looping over `links`
     # and keeping only items where the condition is True. It reads as:
-    # "l for each l in links if l (lowercased) starts with 'http'".
-    http = [l for l in links if l.lower().startswith("http")]
+    # "link for each link in links if link (lowercased) starts with 'http'".
+    # (Single-letter names like `l` are avoided -- they read like 1 or I; the
+    #  linter flags them as ambiguous, Ruff rule E741.)
+    http = [link for link in links if link.lower().startswith("http")]
     if http:
         return http[0]  # [0] is the first element; lists are zero-indexed.
-    mailto = [l for l in links if l.lower().startswith("mailto:")]
+    mailto = [link for link in links if link.lower().startswith("mailto:")]
     if mailto:
         return mailto[0]
     # A "ternary" / conditional expression: VALUE_IF_TRUE if CONDITION else
@@ -294,15 +296,20 @@ def parse_message(raw_bytes):
     domain = addr.split("@")[-1] if "@" in addr else (addr or "(unknown)")
     subject = decode_str(msg.get("Subject", "")).lower()
     when = None  # default; we'll fill it in if the Date header parses.
-    try:
-        # parsedate_to_datetime converts an email Date header into a datetime.
-        dt = parsedate_to_datetime(msg.get("Date"))
-        if dt:
-            # .date() drops the time portion; .isoformat() gives "2024-01-31".
-            when = dt.date().isoformat()
-    except Exception:
-        # Malformed/missing dates are common in real mail -- don't crash on them.
-        when = None
+    # msg.get("Date") is `str | None`. parsedate_to_datetime wants a `str`, so
+    # we narrow the type by only calling it when the header is actually present
+    # (this also silences the type checker's "str | None not assignable" warning).
+    raw_date = msg.get("Date")
+    if raw_date:
+        try:
+            # parsedate_to_datetime converts an email Date header into a datetime.
+            dt = parsedate_to_datetime(raw_date)
+            if dt:
+                # .date() drops the time; .isoformat() gives "2024-01-31".
+                when = dt.date().isoformat()
+        except Exception:
+            # Malformed dates are common in real mail -- don't crash on them.
+            when = None
     unsub_raw = msg.get("List-Unsubscribe")
     # Build and return a dict describing this one message. Returning a dict (vs.
     # many separate values) keeps the caller readable: info["domain"], etc.

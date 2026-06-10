@@ -245,11 +245,16 @@ def fetch_detail(imap, uids, account, folder):
 
             msg = _email.message_from_bytes(item[1])
             name, addr = parseaddr(msg.get("From", ""))
-            try:
-                dt = parsedate_to_datetime(msg.get("Date"))
-                when = dt.date().isoformat() if dt else ""
-            except Exception:
-                when = ""
+            # msg.get("Date") is str | None; only parse when it's actually a
+            # string (narrows the type for parsedate_to_datetime).
+            raw_date = msg.get("Date")
+            when = ""
+            if raw_date:
+                try:
+                    dt = parsedate_to_datetime(raw_date)
+                    when = dt.date().isoformat() if dt else ""
+                except Exception:
+                    when = ""
             rows.append(
                 {
                     "account": account,
