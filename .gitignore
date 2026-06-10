@@ -8,6 +8,8 @@ CLAUDE.md
 # generated output
 senders_*.csv
 worklist.csv
+cleanup_audit.csv
+cleanup_detail.csv
 output/
 
 # python
