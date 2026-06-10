@@ -120,6 +120,10 @@ GMAIL_EMAIL=you@gmail.com
 GMAIL_APP_PASSWORD=abcd efgh ijkl mnop
 ICLOUD_EMAIL=you@icloud.com
 ICLOUD_APP_PASSWORD=abcd-efgh-ijkl-mnop
+
+# Senders inbox_cleanup.py must never delete (comma- or space-separated).
+# Kept here, not in source, so personal addresses stay out of the repo.
+KEEP_FROM=alice@example.com,bob@example.com
 ```
 
 A real environment variable always wins over a value in `.env` (the loader uses
@@ -192,15 +196,18 @@ is the deliberate opposite of `inbox_inventory.py` (which is read-only). Use it
 
 ### What it does
 
-By default it permanently deletes every message dated **before January 1st of
-the current year**, **except** mail from a sender you keep (default
-`21131mmw@gmail.com`), across the accounts you name.
+By default, for **Gmail** it permanently deletes every **unread** message (any
+date); for **iCloud / AOL** it deletes every message dated **before January 1st
+of the current year** (read or not). In all cases it **keeps** mail from the
+senders in your keep-list — set via the `KEEP_FROM` env var in your `.env`
+(comma- or space-separated), or overridden with `--keep-from`.
 
 It is **provider-aware**, which matters a lot:
 
-- **Gmail** — folders are really labels, and deleting from a label only *removes
-  the label*. So Gmail is cleaned **once via `[Gmail]/All Mail`**, where an
-  expunge is a true permanent delete.
+- **Gmail** — folders are really labels, and expunging `[Gmail]/All Mail` does
+  **not** delete under Gmail's default IMAP policy (it silently no-ops). So Gmail
+  candidates are **moved to `[Gmail]/Trash` and expunged there**, the only place
+  a Gmail expunge is a true permanent delete.
 - **iCloud / AOL** — standard IMAP; the tool iterates every selectable folder
   (skipping only Junk / Spam / Sent and non-selectable folders — **Trash and
   Drafts are in scope and will be cleaned**) and expunges per folder.
@@ -223,8 +230,8 @@ It is **provider-aware**, which matters a lot:
 python3 inbox_cleanup.py --accounts icloud aol --list-folders
 
 # 2. DRY RUN with a per-message log, then open cleanup_detail.csv and confirm:
-#    - NO rows are from 21131mmw@gmail.com
-#    - ALL dates are before this year
+#    - NO rows are from a sender in your KEEP_FROM keep-list
+#    - the rows match what you intend to delete (unread / before this year)
 python3 inbox_cleanup.py --accounts gmail icloud aol --detail-log
 
 # 3. Delete for real — one account first — and type DELETE when prompted:
@@ -238,7 +245,7 @@ python3 inbox_cleanup.py --accounts gmail --confirm
 | `--accounts gmail icloud aol` | **Required.** Which mailboxes to clean. |
 | `--confirm` | Actually delete. Without it, the run is a dry run. |
 | `--before YYYY-MM-DD` | Cutoff date (default: Jan 1 of the current year). |
-| `--keep-from ADDRESS` | Sender to never delete (default: `21131mmw@gmail.com`). |
+| `--keep-from ADDR [ADDR ...]` | Senders to never delete (default: the `KEEP_FROM` env var / `.env`). |
 | `--detail-log` | Also write `cleanup_detail.csv` listing every candidate. |
 | `--list-folders` | Show in-scope vs skipped folders and exit. |
 | `--env-file PATH` | `.env` file with credentials (default: `.env`). |
