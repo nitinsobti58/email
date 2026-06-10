@@ -169,6 +169,11 @@ def extract_unsub(header_value):
     """
     if not header_value:
         return ""
+    # Some servers (e.g. iCloud) hand back this header as an email.header.Header
+    # object instead of a plain str. The regex below only accepts str/bytes, so
+    # coerce first -- str(Header) yields the decoded header text. Without this,
+    # the regex raises "expected string or bytes-like object, got 'Header'".
+    header_value = str(header_value)
     # _ANGLE.findall returns a LIST of every bracketed value, e.g.
     # ["https://x.com/unsub?id=1", "mailto:unsub@x.com?subject=no"].
     # The `or [...]` provides a fallback: if findall finds nothing (empty list,
