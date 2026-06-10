@@ -26,8 +26,9 @@ Provider-aware deletion (important!)
 Gmail's IMAP "folders" are really labels. Marking a message \\Deleted inside a
 label folder only REMOVES THE LABEL -- the message survives in "[Gmail]/All Mail".
 So for Gmail we operate ONCE on All Mail, where an expunge is a true permanent
-delete. For iCloud / AOL (standard IMAP) we iterate every normal folder and
-expunge per folder. This is the single most important correctness detail here.
+delete. For iCloud / AOL (standard IMAP) we iterate every selectable folder
+(skipping only Junk/Spam and Sent; Trash and Drafts ARE included) and expunge
+per folder. This is the single most important correctness detail here.
 
 Usage
 -----
@@ -92,10 +93,10 @@ STRATEGY = {"gmail": "all_mail", "icloud": "iterate", "aol": "iterate"}
 # IMAP SPECIAL-USE flags (RFC 6154) marking folders we must NEVER delete from.
 # Lower-cased here so we can compare case-insensitively. "\\noselect" means the
 # entry is a container, not a real mailbox you can open.
+# NOTE: Trash and Drafts are intentionally NOT skipped -- the user wants old mail
+# in those folders deleted too. We still skip Junk/Spam and Sent.
 SKIP_SPECIAL_USE = (
-    r"\trash",
     r"\junk",
-    r"\drafts",
     r"\sent",
     r"\noselect",
     r"\all",  # only Gmail advertises \All; we handle Gmail explicitly anyway
@@ -103,7 +104,8 @@ SKIP_SPECIAL_USE = (
 
 # Fallback for servers (notably AOL) that don't advertise SPECIAL-USE flags:
 # skip a folder if its name contains any of these substrings (case-insensitive).
-SKIP_NAME_PATTERNS = ("trash", "junk", "spam", "deleted", "bin", "drafts", "sent")
+# (Trash/Deleted/Bin and Drafts are deliberately absent so they ARE in scope.)
+SKIP_NAME_PATTERNS = ("junk", "spam", "sent")
 
 # Regex to pull the flag list and mailbox name out of one raw LIST response line,
 # e.g.  (\HasNoChildren \Sent) "/" "Sent Messages"

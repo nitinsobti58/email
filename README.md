@@ -201,9 +201,9 @@ It is **provider-aware**, which matters a lot:
 - **Gmail** — folders are really labels, and deleting from a label only *removes
   the label*. So Gmail is cleaned **once via `[Gmail]/All Mail`**, where an
   expunge is a true permanent delete.
-- **iCloud / AOL** — standard IMAP; the tool iterates every normal folder
-  (skipping Trash / Junk / Spam / Drafts / Sent and non-selectable folders) and
-  expunges per folder.
+- **iCloud / AOL** — standard IMAP; the tool iterates every selectable folder
+  (skipping only Junk / Spam / Sent and non-selectable folders — **Trash and
+  Drafts are in scope and will be cleaned**) and expunges per folder.
 
 ### Safety model
 
