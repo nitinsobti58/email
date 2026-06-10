@@ -5,8 +5,11 @@ inbox_cleanup.py
 ================
 PERMANENTLY delete old mail across your email accounts (Gmail / iCloud / AOL).
 
-By default it deletes every message dated BEFORE January 1st of the current year,
-EXCEPT messages from a sender you want to keep (default: 21131mmw@gmail.com).
+By default, for Gmail it deletes every UNREAD message (all unread mail to date,
+no cutoff); for standard IMAP providers (iCloud / AOL) it deletes every message
+dated BEFORE January 1st of the current year, read or not. In all cases it KEEPS
+mail from the senders in your keep-list (set via the KEEP_FROM env var / .env, or
+overridden with --keep-from).
 
   >>> THIS IS A DESTRUCTIVE TOOL. It is the deliberate opposite of <<<
   >>> inbox_inventory.py, which is read-only. Deletions here are       <<<
@@ -23,12 +26,15 @@ How it stays safe
 
 Provider-aware deletion (important!)
 ------------------------------------
-Gmail's IMAP "folders" are really labels. Marking a message \\Deleted inside a
-label folder only REMOVES THE LABEL -- the message survives in "[Gmail]/All Mail".
-So for Gmail we operate ONCE on All Mail, where an expunge is a true permanent
-delete. For iCloud / AOL (standard IMAP) we iterate every selectable folder
-(skipping only Junk/Spam and Sent; Trash and Drafts ARE included) and expunge
-per folder. This is the single most important correctness detail here.
+Gmail's IMAP "folders" are really labels, and -- critically -- expunging from
+"[Gmail]/All Mail" does NOT permanently delete under Gmail's DEFAULT IMAP policy
+("Archive the message"): the expunge silently no-ops and the mail stays put. The
+ONLY folder where a Gmail expunge truly destroys mail is "[Gmail]/Trash". So for
+Gmail we COPY candidates to Trash (which moves them out of All Mail -- Trash is
+exclusive, so it strips every other label) and then expunge from Trash. For
+iCloud / AOL (standard IMAP) we iterate every selectable folder (skipping only
+Junk/Spam and Sent; Trash and Drafts ARE included) and expunge per folder. This
+Gmail-via-Trash routing is the single most important correctness detail here.
 
 Usage
 -----
@@ -58,6 +64,7 @@ Requirements
 # --- Imports -----------------------------------------------------------------
 import argparse  # parse command-line flags
 import csv  # write the audit / detail CSV files
+import os  # read the KEEP_FROM env var (keeps personal addresses out of source)
 import re  # parse the LIST folder lines
 import sys  # write progress to stderr
 from datetime import datetime  # compute the "Jan 1 this year" cutoff
@@ -83,7 +90,24 @@ from inbox_inventory import decode_str  # decode MIME-encoded Subject for the lo
 
 # --- Configuration constants -------------------------------------------------
 BATCH = 500  # UIDs per server round-trip (mirrors inbox_inventory)
-DEFAULT_KEEP_FROM = "21131mmw@gmail.com"  # sender whose mail we never delete
+
+# Senders whose mail we NEVER delete (each becomes a 'NOT FROM' term). To keep
+# personal addresses out of this (public) repo, the defaults are NOT hard-coded
+# here -- they're read at runtime from the KEEP_FROM env var, which you set in
+# your gitignored .env, e.g.  KEEP_FROM=alice@example.com,bob@example.com
+# (comma- or space-separated). If KEEP_FROM is unset the default keep-list is
+# empty, meaning nothing is excluded -- so set it before a live delete.
+KEEP_FROM_ENV = "KEEP_FROM"
+
+
+def keep_from_default():
+    """Return the keep-list from the KEEP_FROM env var (comma/space separated).
+
+    MUST be called AFTER load_env() so a .env entry is visible. Returns [] when
+    the var is unset or empty.
+    """
+    raw = os.environ.get(KEEP_FROM_ENV, "")
+    return [addr.strip() for addr in re.split(r"[,\s]+", raw) if addr.strip()]
 
 # Per-provider deletion STRATEGY. "all_mail" = Gmail (delete once via All Mail);
 # "iterate" = standard IMAP (loop every normal folder). This is what makes the
@@ -145,16 +169,32 @@ def before_date_str(dt):
     return f"{dt.day:02d}-{_MONTHS[dt.month - 1]}-{dt.year}"
 
 
-def build_search_criteria(before_str, keep_from):
-    """Build the IMAP SEARCH argument list.
+def build_search_criteria(account, before_str, keep_from):
+    """Build the IMAP SEARCH argument list for one account.
 
-    Returns e.g. ["BEFORE", "01-Jan-2026", "NOT", "FROM", "21131mmw@gmail.com"].
+    The "what to delete" half is provider-specific:
+      * gmail  -> UNSEEN: every UNREAD message, with NO date cutoff (all unread
+        mail to date). Note this is typically far more mail than you'd expect --
+        most mailboxes have many thousands of unread messages.
+      * others -> BEFORE <date>: everything dated before the cutoff, read or not.
+    The "what to keep" half is the same everywhere: one 'NOT FROM addr' term per
+    address in `keep_from` (a sequence), so each of those senders is excluded.
+
+    Returns e.g. for gmail with two keep addresses:
+      ["UNSEEN", "NOT", "FROM", "alice@example.com",
+       "NOT", "FROM", "bob@example.com"]
     IMAP ANDs space-separated terms together, and 'NOT FROM addr' excludes that
     sender. Caveat: IMAP FROM is a SUBSTRING match on the From header, not an
     exact address match -- so this errs on the safe side (it KEEPS anything whose
-    From header merely contains the address; it never deletes it by mistake).
+    From header merely contains a kept address; it never deletes it by mistake).
     """
-    return ["BEFORE", before_str, "NOT", "FROM", keep_from]
+    if STRATEGY.get(account) == "all_mail":  # gmail: all unread, no date limit
+        criteria = ["UNSEEN"]
+    else:  # iCloud / AOL: fixed date cutoff (read or unread)
+        criteria = ["BEFORE", before_str]
+    for addr in keep_from:
+        criteria += ["NOT", "FROM", addr]
+    return criteria
 
 
 # --- Folder parsing / filtering ----------------------------------------------
@@ -310,14 +350,66 @@ def delete_uids(imap, uids):
     return len(uids)
 
 
+# Gmail's Trash mailbox -- the ONLY place a Gmail expunge is a true delete.
+GMAIL_TRASH = "[Gmail]/Trash"
+
+
+def gmail_delete_uids(imap, uids, criteria):
+    """Permanently delete Gmail messages by ROUTING THEM THROUGH TRASH.
+
+    Why this exists: marking a message \\Deleted in '[Gmail]/All Mail' and
+    expunging does NOT delete it under Gmail's default IMAP policy ("Archive the
+    message") -- the expunge is a silent no-op (this is exactly the bug where the
+    audit reported thousands "deleted" but the mailbox was unchanged). The
+    reliable way to permanently delete in Gmail is to MOVE the message to Trash
+    and expunge there; expunging Trash is always a real "empty trash" delete,
+    independent of the account's IMAP settings.
+
+    On entry, All Mail is the currently selected, read-write folder. Steps:
+      1. UID COPY each candidate to '[Gmail]/Trash'. In Gmail, Trash is exclusive
+         -- adding it strips All Mail and every other label, so this MOVES the
+         message (it leaves All Mail) rather than leaving a duplicate behind.
+      2. SELECT Trash read-write and re-run the same SEARCH to find what now sits
+         in Trash.
+      3. Flag those \\Deleted and UID EXPUNGE -> permanent.
+
+    Returns the number of messages expunged from Trash.
+
+    Note: step 2 also catches any messages ALREADY in Trash that match the
+    criteria (e.g. previously-trashed unread mail). Deleting those is consistent
+    with the tool's intent, and Gmail purges Trash after 30 days regardless -- so
+    the reported deleted_count can legitimately exceed the All Mail candidate_count.
+    """
+    if not uids:
+        return 0
+    # 1) Move every candidate to Trash, in batches (still using All Mail UIDs).
+    for i in range(0, len(uids), BATCH):
+        chunk = uids[i : i + BATCH]
+        uid_set = b",".join(chunk).decode()
+        imap.uid("COPY", uid_set, imap_quote(GMAIL_TRASH))
+    # 2) Re-open Trash read-write and find the messages we just moved.
+    typ, _ = imap.select(imap_quote(GMAIL_TRASH), readonly=False)
+    if typ != "OK":
+        print(f"    could not open {GMAIL_TRASH!r}; nothing expunged", file=sys.stderr)
+        return 0
+    trash_uids = search_uids(imap, criteria)
+    # 3) Flag \Deleted and expunge -- delete_uids handles batching + UID EXPUNGE.
+    return delete_uids(imap, trash_uids)
+
+
 # --- Per-provider processing -------------------------------------------------
-def process_account(imap, account, criteria, do_delete, detail_log):
+def process_account(imap, account, before_str, keep_from, do_delete, detail_log):
     """Search (and optionally delete) for one account, honoring its STRATEGY.
+
+    The SEARCH criteria are built per-account (Gmail deletes unread with no date
+    limit; iCloud/AOL delete before `before_str`), keeping every `keep_from`
+    sender either way.
 
     Returns (report_rows, detail_rows):
       report_rows  -- one dict per folder: account/folder/candidate/deleted.
       detail_rows  -- per-message rows when detail_log is True, else [].
     """
+    criteria = build_search_criteria(account, before_str, keep_from)
     # Pick the folders to process based on the provider's strategy.
     if STRATEGY[account] == "all_mail":
         # Gmail: a single pass over All Mail IS the union of all mail, and is the
@@ -348,7 +440,12 @@ def process_account(imap, account, criteria, do_delete, detail_log):
 
         deleted = 0
         if do_delete and candidate:
-            deleted = delete_uids(imap, uids)
+            if STRATEGY[account] == "all_mail":
+                # Gmail: expunging All Mail is a no-op -- route via Trash instead.
+                deleted = gmail_delete_uids(imap, uids, criteria)
+            else:
+                # iCloud / AOL: standard IMAP, expunge in place works.
+                deleted = delete_uids(imap, uids)
 
         verb = "deleted" if do_delete else "would delete"
         print(
@@ -403,11 +500,16 @@ def confirm_prompt(report_rows, before_str, keep_from):
     Returns True only if the user types exactly 'DELETE'.
     """
     total = sum(r["candidate_count"] for r in report_rows)
+    accounts = {r["account"] for r in report_rows}
     print("\n" + "=" * 64, file=sys.stderr)
     print("  PERMANENT DELETE -- this cannot be undone (no Trash recovery)", file=sys.stderr)
     print("=" * 64, file=sys.stderr)
-    print(f"  Cutoff      : delete mail BEFORE {before_str}", file=sys.stderr)
-    print(f"  Keeping     : mail from {keep_from}", file=sys.stderr)
+    if "gmail" in accounts:
+        print("  gmail       : delete ALL unread mail (no date limit)", file=sys.stderr)
+    others = sorted(a for a in accounts if a != "gmail")
+    if others:
+        print(f"  {','.join(others)}: delete mail BEFORE {before_str}", file=sys.stderr)
+    print(f"  Keeping     : mail from {', '.join(keep_from)}", file=sys.stderr)
     print(f"  Candidates  : {total} messages across {len(report_rows)} folder(s)", file=sys.stderr)
     print("=" * 64, file=sys.stderr)
     # input() (not getpass) -- we WANT this typed word visible for confirmation.
@@ -439,8 +541,10 @@ def main():
     )
     ap.add_argument(
         "--keep-from",
-        default=DEFAULT_KEEP_FROM,
-        help=f"Never delete mail from this sender (default: {DEFAULT_KEEP_FROM}).",
+        nargs="+",
+        default=None,
+        help="Never delete mail from these senders, space-separated. "
+        "Overrides the KEEP_FROM env var / .env default.",
     )
     ap.add_argument(
         "--detail-log",
@@ -467,6 +571,16 @@ def main():
     load_env(args.env_file)
     outdir = args.outdir.rstrip("/")
 
+    # Resolve the keep-list: explicit --keep-from wins, else the KEEP_FROM env
+    # var (loaded from .env above). keep_from_default() returns [] if unset.
+    keep_from = args.keep_from if args.keep_from is not None else keep_from_default()
+    if not keep_from:
+        print(
+            "  warning: keep-list is EMPTY (no KEEP_FROM in .env, no --keep-from)."
+            " Mail from every sender is eligible for deletion.",
+            file=sys.stderr,
+        )
+
     # Work out the cutoff date. Default = Jan 1 of the current year.
     if args.before:
         try:
@@ -478,12 +592,18 @@ def main():
         today = datetime.now()
         cutoff = datetime(today.year, 1, 1)
     before_str = before_date_str(cutoff)
-    criteria = build_search_criteria(before_str, args.keep_from)
+    # Criteria are built per-account inside process_account (Gmail = unread/no
+    # date, iCloud/AOL = before the cutoff), so nothing is precomputed here.
 
     # Loud banner so the mode is never ambiguous.
     mode = "DELETE (live)" if args.confirm else "DRY RUN (no changes)"
     print(f"\nMode: {mode}", file=sys.stderr)
-    print(f"Deleting mail BEFORE {before_str}, keeping {args.keep_from}\n", file=sys.stderr)
+    if "gmail" in args.accounts:
+        print("  gmail        : deleting ALL unread mail (no date limit)", file=sys.stderr)
+    others = [a for a in args.accounts if a != "gmail"]
+    if others:
+        print(f"  {','.join(others)}: deleting mail BEFORE {before_str}", file=sys.stderr)
+    print(f"Keeping mail from: {', '.join(keep_from) or '(none)'}\n", file=sys.stderr)
 
     # PHASE 1 -- always COUNT first (read-only), even when --confirm is set, so
     # the user sees real numbers before any deletion happens.
@@ -513,7 +633,8 @@ def main():
         try:
             # do_delete=False here: PHASE 1 is always a read-only count.
             rows, detail = process_account(
-                imap, account, criteria, do_delete=False, detail_log=args.detail_log
+                imap, account, before_str, keep_from,
+                do_delete=False, detail_log=args.detail_log,
             )
         except Exception as e:
             print(f"  scan failed for {account}: {e}", file=sys.stderr)
@@ -554,7 +675,7 @@ def main():
         return
 
     # PHASE 2 -- require the typed DELETE confirmation, then actually delete.
-    if not confirm_prompt(all_report, before_str, args.keep_from):
+    if not confirm_prompt(all_report, before_str, keep_from):
         print("\nAborted. No changes made.", file=sys.stderr)
         for imap in connections.values():
             imap.logout()
@@ -566,7 +687,8 @@ def main():
         try:
             # do_delete=True: now folders open read-write and we expunge.
             rows, _ = process_account(
-                imap, account, criteria, do_delete=True, detail_log=False
+                imap, account, before_str, keep_from,
+                do_delete=True, detail_log=False,
             )
             final_report.extend(rows)
         except Exception as e:
